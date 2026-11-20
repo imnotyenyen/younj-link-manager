@@ -218,8 +218,13 @@ async function handleShorten(request, env, url) {
     : json(ok?{status:"success",shortenedUrl:v}:{status:"error",message:v},status);
   const key=String(env.VUOTNHANH_API_KEY||"").trim();
   if(!key) return reply(false,"Chua cau hinh VUOTNHANH_API_KEY",500);
-  if(!(await safeEqual(String(get("api")||"").trim(),key))) return reply(false,"API key khong hop le",401);
-  const dest=String(get("url")||"").trim();
+  // Chiu duoc kieu ghep link: /st?api=KEY?url=... hoac /st?api=KEY&url=...
+  let rawApi=String(get("api")||get("token")||get("key")||"").trim(), tail="";
+  const cut=rawApi.search(/[?&]/);
+  if(cut>=0){ tail=rawApi.slice(cut+1); rawApi=rawApi.slice(0,cut).trim(); }
+  if(!(await safeEqual(rawApi,key))) return reply(false,"API key khong hop le (nhan duoc "+rawApi.length+" ky tu)",401);
+  let dest=String(get("url")||"").trim();
+  if(!dest && tail){ const m=tail.match(/(?:^|&)url=(.*)$/s); if(m){ try{ dest=decodeURIComponent(m[1]).trim(); }catch{ dest=m[1].trim(); } } }
   if(!validUrl(dest) || dest.length>2048) return reply(false,"Link dich khong hop le",400);
   const alias=slugify(String(get("alias")||""));
   const base=url.origin+"/r/";
