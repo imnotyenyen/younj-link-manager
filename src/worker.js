@@ -197,10 +197,54 @@ async function redirectPage(slug, env, request) {
   return html(`<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${String(settings.site_name||"YOUNJ").replace(/[<>&"]/g,"")}</title><body style="font:16px system-ui;background:#f5f7fb;color:#172033;display:grid;place-items:center;min-height:100vh;margin:0"><main style="background:white;padding:32px;border-radius:16px;text-align:center;max-width:440px;width:90%;box-shadow:0 12px 40px #0001"><h2>${message}</h2><p>Bạn sẽ được chuyển đến liên kết sau <b id="n">${wait}</b> giây.</p><button id="go" style="border:0;background:#2563eb;color:white;border-radius:9px;padding:12px 18px;font-weight:700">Tiếp tục</button></main><script>const dest=${destination};let n=${wait};const el=document.getElementById('n');const go=()=>location.replace(dest);document.getElementById('go').onclick=go;if(n<=0)go();else{const t=setInterval(()=>{n--;el.textContent=n;if(n<=0){clearInterval(t);go()}},1000)}</script></body></html>`);
 }
 
+function randomSlug(n=8) {
+  const a="abcdefghijkmnpqrstuvwxyz23456789", r=crypto.getRandomValues(new Uint8Array(n));
+  return Array.from(r,x=>a[x%a.length]).join("");
+}
+// Endpoint cho vuotnhanh.com: /st?api=KEY&url=LINK_GOC[&alias=ten][&format=json|text]
+async function handleShorten(request, env, url) {
+  let extra=new URLSearchParams();
+  if(request.method==="POST"){
+    try{
+      if((request.headers.get("content-type")||"").includes("json")){
+        const b=await request.json(); extra=new URLSearchParams(Object.entries(b).map(([k,v])=>[k,String(v)]));
+      } else extra=new URLSearchParams(await request.text());
+    }catch{}
+  }
+  const get=k=>url.searchParams.get(k) ?? extra.get(k);
+  const fmt=String(get("format")||"json").toLowerCase();
+  const reply=(ok,v,status=200)=>fmt==="text"
+    ? new Response(v,{status,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}})
+    : json(ok?{status:"success",shortenedUrl:v}:{status:"error",message:v},status);
+  const key=String(env.VUOTNHANH_API_KEY||"").trim();
+  if(!key) return reply(false,"Chua cau hinh VUOTNHANH_API_KEY",500);
+  if(!(await safeEqual(String(get("api")||"").trim(),key))) return reply(false,"API key khong hop le",401);
+  const dest=String(get("url")||"").trim();
+  if(!validUrl(dest) || dest.length>2048) return reply(false,"Link dich khong hop le",400);
+  const alias=slugify(String(get("alias")||""));
+  const base=url.origin+"/r/";
+  if(!alias){
+    const old=await env.DB.prepare("SELECT slug FROM links WHERE destination_url=? AND title='[api]' AND enabled=1 LIMIT 1").bind(dest).first();
+    if(old) return reply(true,base+old.slug);
+  }
+  for(let i=0;i<6;i++){
+    const slug=(alias&&i===0)?alias:randomSlug();
+    try{
+      await env.DB.prepare("INSERT INTO links(slug,title,destination_url) VALUES(?,?,?)").bind(slug,"[api]",dest).run();
+      try{ await log(env,"api_link_created",slug); }catch{}
+      return reply(true,base+slug);
+    }catch(e){
+      if(alias&&i===0) return reply(false,"Alias da ton tai",409);
+    }
+  }
+  return reply(false,"Khong the tao link",500);
+}
+
 export default {
   async fetch(request, env) {
     const url=new URL(request.url);
     try {
+      if(url.pathname==="/st") return await handleShorten(request,env,url);
       if(url.pathname.startsWith("/api/")) return await handleApi(request,env,url);
       if(url.pathname==="/login") return html(LOGIN_HTML);
       if(url.pathname==="/" || url.pathname==="/index.html"){
