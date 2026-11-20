@@ -22,18 +22,25 @@ async function hmac(secret, value) {
   const key=await crypto.subtle.importKey("raw",encoder.encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
   return b64(await crypto.subtle.sign("HMAC",key,encoder.encode(value)));
 }
+async function safeEqual(a, b) {
+  const [x, y] = await Promise.all([hmac("cmp", a), hmac("cmp", b)]);
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
+  return d === 0;
+}
 async function makeCookie(env) {
   const exp=Math.floor(Date.now()/1000)+Number(env.SESSION_TTL_HOURS||12)*3600;
   const payload=b64(encoder.encode(JSON.stringify({exp,nonce:crypto.randomUUID()})));
   return `${payload}.${await hmac(env.ADMIN_PASSWORD,payload)}`;
 }
 async function authorized(request, env) {
+  if(!env.ADMIN_PASSWORD) return false;
   const cookie=(request.headers.get("Cookie")||"").split(";").map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+"="));
   if(!cookie) return false;
   const token=cookie.slice(COOKIE_NAME.length+1), parts=token.split(".");
   if(parts.length!==2) return false;
   const sig=await hmac(env.ADMIN_PASSWORD,parts[0]);
-  if(sig!==parts[1]) return false;
+  if(!(await safeEqual(sig,parts[1]))) return false;
   try { return JSON.parse(new TextDecoder().decode(unb64(parts[0]))).exp>Date.now()/1000; } catch { return false; }
 }
 function cookieHeader(value, maxAge=43200) {
@@ -71,14 +78,14 @@ async function dashboard(){const d=await api('stats');const max=Math.max(1,...d.
 <div class="cards"><div class="card"><div class="muted">Tổng liên kết</div><div class="metric">\${d.total_links}</div></div><div class="card"><div class="muted">Tổng lượt truy cập</div><div class="metric">\${d.total_visits}</div></div><div class="card"><div class="muted">Lượt hôm nay</div><div class="metric">\${d.today_visits}</div></div><div class="card"><div class="muted">Link đang bật</div><div class="metric">\${d.active_links}</div></div></div>
 <div class="panel"><h3>Lượt truy cập 7 ngày gần nhất</h3><div class="chart">\${d.daily.map(x=>\`<div class="barwrap"><div class="bar" style="height:\${Math.max(2,x.count/max*145)}px" title="\${x.count} lượt"></div><div class="barlabel">\${esc(x.day.slice(5))}</div></div>\`).join('')}</div></div>
 <div class="panel"><h3>Liên kết mới nhất</h3>\${linkTable(d.latest||[],true)}</div>\`}
-function linkTable(rows,compact=false){if(!rows.length)return '<div class="empty">Chưa có liên kết nào</div>';return '<div class="tablewrap"><table><thead><tr><th>Mã link</th><th>Tiêu đề</th><th>Link đích</th><th>Lượt truy cập</th><th>Trạng thái</th>'+(compact?'':'<th>Thao tác</th>')+'</tr></thead><tbody>'+rows.map(x=>'<tr><td><b>/r/'+esc(x.slug)+'</b></td><td>'+esc(x.title||'—')+'</td><td title="'+esc(x.destination_url)+'">'+esc(x.destination_url).slice(0,48)+'</td><td>'+x.visits+'</td><td><span class="pill '+(x.enabled?'':'off')+'">'+(x.enabled?'Đang bật':'Đã tắt')+'</span></td>'+(compact?'':'<td><div class="actions"><button class="btn secondary small" onclick="editLink('+x.id+')">Sửa</button><button class="btn secondary small" onclick="toggleLink('+x.id+','+(x.enabled?0:1)+')">'+(x.enabled?'Tắt':'Bật')+'</button><button class="btn danger small" onclick="deleteLink('+x.id+')">Xóa</button></div></td>')+'</tr>').join('')+'</tbody></table></div>'}
+function linkTable(rows,compact=false){if(!rows.length)return '<div class="empty">Chưa có liên kết nào</div>';return '<div class="tablewrap"><table><thead><tr><th>Mã link</th><th>Tiêu đề</th><th>Link đích</th><th>Lượt truy cập</th><th>Trạng thái</th>'+(compact?'':'<th>Thao tác</th>')+'</tr></thead><tbody>'+rows.map(x=>'<tr><td><b>/r/'+esc(x.slug)+'</b></td><td>'+esc(x.title||'—')+'</td><td title="'+esc(x.destination_url)+'">'+esc(String(x.destination_url).slice(0,48))+'</td><td>'+x.visits+'</td><td><span class="pill '+(x.enabled?'':'off')+'">'+(x.enabled?'Đang bật':'Đã tắt')+'</span></td>'+(compact?'':'<td><div class="actions"><button class="btn secondary small" onclick="editLink('+x.id+')">Sửa</button><button class="btn secondary small" onclick="toggleLink('+x.id+','+(x.enabled?0:1)+')">'+(x.enabled?'Tắt':'Bật')+'</button><button class="btn danger small" onclick="deleteLink('+x.id+')">Xóa</button></div></td>')+'</tr>').join('')+'</tbody></table></div>'}
 async function linkPage(){links=(await api('links')).links;$('#view').innerHTML='<div class="panel"><h3 id="formtitle">Thêm liên kết mới</h3><form id="linkform" class="formgrid"><input type="hidden" id="linkid"><div class="field"><label>Tiêu đề</label><input id="title" placeholder="Ví dụ: Link tài liệu"></div><div class="field"><label>Mã link (slug)</label><input id="slug" placeholder="tai-lieu-moi"></div><div class="field full"><label>Link đích (https://...)</label><input id="dest" type="url" required placeholder="https://example.com"></div><div class="field full"><button class="btn">Lưu liên kết</button> <button type="button" class="btn secondary" onclick="resetForm()">Làm mới</button></div></form></div><div class="panel"><div class="toolbar"><input id="search" placeholder="Tìm theo mã link hoặc tiêu đề..."></div><div id="linklist"></div></div>';$('#linklist').innerHTML=linkTable(links);$('#search').oninput=()=>$('#linklist').innerHTML=linkTable(links.filter(x=>(x.slug+' '+x.title+' '+x.destination_url).toLowerCase().includes($('#search').value.toLowerCase())));$('#linkform').onsubmit=saveLink}
 function resetForm(){$('#linkid').value='';$('#title').value='';$('#slug').value='';$('#dest').value='';$('#formtitle').textContent='Thêm liên kết mới'}
 window.editLink=id=>{const x=links.find(a=>a.id===id);if(!x)return;$('#linkid').value=x.id;$('#title').value=x.title;$('#slug').value=x.slug;$('#dest').value=x.destination_url;$('#formtitle').textContent='Chỉnh sửa liên kết';window.scrollTo({top:0,behavior:'smooth'})};
 async function saveLink(e){e.preventDefault();try{await api('links',{method:'POST',body:JSON.stringify({id:$('#linkid').value||null,title:$('#title').value,slug:$('#slug').value,destination_url:$('#dest').value})});toast('Đã lưu liên kết');linkPage()}catch(e){toast(e.message)}}
 window.toggleLink=async(id,enabled)=>{try{await api('links/'+id,{method:'PATCH',body:JSON.stringify({enabled})});toast('Đã cập nhật trạng thái');linkPage()}catch(e){toast(e.message)}};
 window.deleteLink=async id=>{if(!confirm('Xóa liên kết này? Lịch sử truy cập vẫn được giữ.'))return;try{await api('links/'+id,{method:'DELETE'});toast('Đã xóa liên kết');linkPage()}catch(e){toast(e.message)}};
-async function visitsPage(){const d=await api('visits');$('#view').innerHTML='<div class="cards"><div class="card"><div class="muted">Tổng lượt truy cập</div><div class="metric">'+d.total+'</div></div><div class="card"><div class="muted">Hôm nay</div><div class="metric">'+d.today+'</div></div></div><div class="panel"><h3>Lịch sử truy cập gần đây</h3><div class="tablewrap"><table><thead><tr><th>Thời gian</th><th>Mã link</th><th>Kết quả</th><th>Quốc gia</th><th>Thiết bị</th><th>Trình duyệt</th><th>Giới thiệu</th></tr></thead><tbody>'+(d.rows.length?d.rows.map(x=>'<tr><td>'+esc(x.visited_at)+'</td><td>'+esc(x.slug)+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(x.country||'—')+'</td><td>'+esc(x.device||'—')+'</td><td>'+esc(x.browser||'—')+'</td><td>'+esc(x.referrer||'—').slice(0,40)+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">Chưa có dữ liệu</td></tr>')+'</tbody></table></div></div>'}
+async function visitsPage(){const d=await api('visits');$('#view').innerHTML='<div class="cards"><div class="card"><div class="muted">Tổng lượt truy cập</div><div class="metric">'+d.total+'</div></div><div class="card"><div class="muted">Hôm nay</div><div class="metric">'+d.today+'</div></div></div><div class="panel"><h3>Lịch sử truy cập gần đây</h3><div class="tablewrap"><table><thead><tr><th>Thời gian</th><th>Mã link</th><th>Kết quả</th><th>Quốc gia</th><th>Thiết bị</th><th>Trình duyệt</th><th>Giới thiệu</th></tr></thead><tbody>'+(d.rows.length?d.rows.map(x=>'<tr><td>'+esc(x.visited_at)+'</td><td>'+esc(x.slug)+'</td><td>'+esc(x.outcome)+'</td><td>'+esc(x.country||'—')+'</td><td>'+esc(x.device||'—')+'</td><td>'+esc(x.browser||'—')+'</td><td>'+esc(String(x.referrer||'—').slice(0,40))+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">Chưa có dữ liệu</td></tr>')+'</tbody></table></div></div>'}
 async function settingsPage(){const d=await api('settings');const s=d.settings;$('#view').innerHTML='<div class="panel"><h3>Cấu hình website</h3><form id="settingsform" class="formgrid"><div class="field"><label>Tên website</label><input name="site_name" value="'+esc(s.site_name)+'"></div><div class="field"><label>Logo / chữ thương hiệu</label><input name="logo_text" value="'+esc(s.logo_text)+'"></div><div class="field"><label>Favicon URL</label><input name="favicon_url" value="'+esc(s.favicon_url)+'" placeholder="https://..."></div><div class="field"><label>Thời gian chờ (giây)</label><input name="wait_seconds" type="number" min="0" max="120" value="'+esc(s.wait_seconds)+'"></div><div class="field full"><label>Nội dung trang vượt link</label><textarea name="interstitial_message">'+esc(s.interstitial_message)+'</textarea></div><div class="field"><label>Chế độ bảo trì</label><select name="maintenance"><option value="0" '+(s.maintenance==='0'?'selected':'')+'>Tắt</option><option value="1" '+(s.maintenance==='1'?'selected':'')+'>Bật</option></select></div><div class="field full"><button class="btn">Lưu cài đặt</button></div></form></div>';$('#settingsform').onsubmit=async e=>{e.preventDefault();const obj=Object.fromEntries(new FormData(e.target));try{await api('settings',{method:'POST',body:JSON.stringify(obj)});toast('Đã lưu cài đặt')}catch(e){toast(e.message)}}}
 async function logsPage(){const d=await api('logs');$('#view').innerHTML='<div class="panel"><h3>Nhật ký hoạt động</h3><div class="tablewrap"><table><thead><tr><th>Thời gian</th><th>Hành động</th><th>Chi tiết</th></tr></thead><tbody>'+(d.rows.length?d.rows.map(x=>'<tr><td>'+esc(x.created_at)+'</td><td>'+esc(x.action)+'</td><td>'+esc(x.detail)+'</td></tr>').join(''):'<tr><td colspan="3" class="empty">Chưa có nhật ký</td></tr>')+'</tbody></table></div></div>'}
 render();
@@ -89,7 +96,7 @@ async function handleApi(request, env, url) {
   if(path==="login" && request.method==="POST"){
     const b=await bodyJson(request);
     if(!env.ADMIN_PASSWORD) return json({error:"Chưa cấu hình ADMIN_PASSWORD"},500);
-    if(typeof b.password!=="string" || b.password!==env.ADMIN_PASSWORD) return json({error:"Sai mật khẩu"},401);
+    if(typeof b.password!=="string" || !(await safeEqual(b.password,env.ADMIN_PASSWORD))) return json({error:"Sai mật khẩu"},401);
     const token=await makeCookie(env);
     await log(env,"admin_login","Đăng nhập thành công");
     return new Response(JSON.stringify({ok:true}),{headers:{"content-type":"application/json","set-cookie":cookieHeader(token,Number(env.SESSION_TTL_HOURS||12)*3600),"cache-control":"no-store"}});
@@ -106,7 +113,7 @@ async function handleApi(request, env, url) {
       env.DB.prepare("SELECT COUNT(*) n FROM links WHERE enabled=1").first(),
       env.DB.prepare("SELECT l.*, (SELECT COUNT(*) FROM visits v WHERE v.link_id=l.id) visits FROM links l ORDER BY l.id DESC LIMIT 8").all()
     ]);
-    const daily=await env.DB.prepare("SELECT date(visited_at) day,COUNT(*) count FROM visits WHERE visited_at>=datetime('now','-6 days') GROUP BY date(visited_at) ORDER BY day").all();
+    const daily=await env.DB.prepare("SELECT date(visited_at) day,COUNT(*) count FROM visits WHERE date(visited_at)>=date('now','-6 days') GROUP BY date(visited_at) ORDER BY day").all();
     const map=new Map((daily.results||[]).map(x=>[x.day,x.count]));
     const days=Array.from({length:7},(_,i)=>{const dt=new Date();dt.setUTCDate(dt.getUTCDate()-(6-i));const day=dt.toISOString().slice(0,10);return {day,count:map.get(day)||0}});
     return json({total_links:a.n,total_visits:b.n,today_visits:c.n,active_links:d.n,daily:days,latest:latest.results});
@@ -185,7 +192,7 @@ async function redirectPage(slug, env, request) {
     .bind(link.id,slug,"visit",country,info.device,info.browser,ref).run();
   const wait=Math.max(0,Math.min(120,Number(settings.wait_seconds||0)));
   const message=String(settings.interstitial_message||"Đang chuyển hướng...").replace(/[<>&"]/g,"");
-  const destination=JSON.stringify(link.destination_url);
+  const destination=JSON.stringify(link.destination_url).replace(/</g,"\\u003c");
   return html(`<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${String(settings.site_name||"YOUNJ").replace(/[<>&"]/g,"")}</title><body style="font:16px system-ui;background:#f5f7fb;color:#172033;display:grid;place-items:center;min-height:100vh;margin:0"><main style="background:white;padding:32px;border-radius:16px;text-align:center;max-width:440px;width:90%;box-shadow:0 12px 40px #0001"><h2>${message}</h2><p>Bạn sẽ được chuyển đến liên kết sau <b id="n">${wait}</b> giây.</p><button id="go" style="border:0;background:#2563eb;color:white;border-radius:9px;padding:12px 18px;font-weight:700">Tiếp tục</button></main><script>const dest=${destination};let n=${wait};const el=document.getElementById('n');const go=()=>location.replace(dest);document.getElementById('go').onclick=go;if(n<=0)go();else{const t=setInterval(()=>{n--;el.textContent=n;if(n<=0){clearInterval(t);go()}},1000)}</script></body></html>`);
 }
 
